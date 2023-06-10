@@ -12,10 +12,5 @@ ark-poly = "0.4"
 ark-poly-commit = "0.4.0"
 ark-serialize = { version = "^0.4", features = ["derive"] }
 ark-crypto-primitives = {version = "^0.4.0", default-features = false, features = ["sponge"] }
-#ark-test-curves = "0.4"
 ark-bn254 = "0.4"
 rand = "0.8.5"
-
-# Currently have chicken and egg problem...
-# ark-poly-commit dependencies are the 0.4 version of libraries
-# However, the ToBytes trait, which is required by PolynomialCommitment associated types, only exists in the 0.3 ark_ff library
