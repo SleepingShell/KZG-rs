@@ -1,7 +1,7 @@
 use std::{error::Error, fmt, marker::PhantomData};
 
 use ark_crypto_primitives::sponge::CryptographicSponge;
-use ark_ff::{PrimeField, Field};
+use ark_ff::{PrimeField, Field, Zero};
 use ark_poly::DenseUVPolynomial;
 use ark_poly_commit::{
     PCCommitment, PCCommitterKey, PCPreparedCommitment, PCPreparedVerifierKey,
@@ -24,9 +24,11 @@ impl <F: PrimeField, G: Group<ScalarField = F>> KZGUniversalParams<G> {
             degree: max_degree,
             ref_string: vec![]
         };
+        params.ref_string.push(generator);
+
         let mut sec_cur: F = F::one();
-        for i in 0..max_degree {
-            sec_cur = sec_cur.mul(secret);
+        for i in 1..max_degree {
+            sec_cur = sec_cur.mul(secret);                  //α^i
             params.ref_string.push(generator * (sec_cur))
         }
 
@@ -38,6 +40,10 @@ impl <F: PrimeField, G: Group<ScalarField = F>> KZGUniversalParams<G> {
             degree: trim_degree,
             ref_string: self.ref_string[0..trim_degree].to_vec()
         }
+    }
+
+    fn element_at(&self, index: usize) -> G {
+        self.ref_string[index]
     }
 }
 
@@ -74,20 +80,32 @@ impl<G: Group> PCPreparedVerifierKey<KZGUniversalParams<G>> for KZGUniversalPara
 }
 
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize, Default)]
-struct KZGCommitment {}
+struct KZGCommitment<G: Group> {
+    commit: G
+}
 
-impl PCCommitment for KZGCommitment {
+impl<G: Group> KZGCommitment<G> {
+    fn new(C: G) -> Self {
+        Self {
+            commit: C
+        }
+    }
+}
+
+impl<G: Group> PCCommitment for KZGCommitment<G> {
     fn empty() -> Self {
-        Self {}
+        Self {
+            commit: G::zero()
+        }
     }
     fn has_degree_bound(&self) -> bool {
         false
     }
 }
 
-impl PCPreparedCommitment<Self> for KZGCommitment {
-    fn prepare(comm: &KZGCommitment) -> Self {
-        Self {}
+impl<G: Group> PCPreparedCommitment<Self> for KZGCommitment<G> {
+    fn prepare(comm: &KZGCommitment<G>) -> Self {
+        comm.clone()
     }
 }
 
@@ -190,8 +208,8 @@ impl<
     type CommitterKey = KZGUniversalParams<E::G1>;
     type VerifierKey = KZGUniversalParams<E::G1>;
     type PreparedVerifierKey = KZGUniversalParams<E::G1>;
-    type Commitment = KZGCommitment;
-    type PreparedCommitment = KZGCommitment;
+    type Commitment = KZGCommitment<E::G1>;
+    type PreparedCommitment = KZGCommitment<E::G1>;
     type Randomness = KZGRandomness;
     type Proof = KZGProof;
     type BatchProof = KZGBatchProof;
@@ -236,8 +254,26 @@ impl<
     where
         P: 'a
     {
+        let mut commitments: Vec<ark_poly_commit::LabeledCommitment<Self::Commitment>> = Vec::new();
+        
+        for poly in polynomials.into_iter() {
+            let coeffs: &[E::ScalarField] = poly.coeffs();
+            let mut sum = E::G1::zero();
+            
+            let mut i = 0;
+            for c in coeffs {
+                sum += ck.element_at(i) * c;
+                i += 1;
+            }
 
-        todo!()
+            commitments.push(ark_poly_commit::LabeledCommitment::new(
+                "KZG-commit".to_owned(),
+                KZGCommitment::new(sum),
+                Some(i)
+            ));
+        }
+        
+        Ok( (commitments, Vec::new()) )
     }
 
     fn open<'a>(
@@ -282,27 +318,31 @@ mod tests {
     use ark_crypto_primitives::sponge::poseidon::{PoseidonConfig, PoseidonSponge};
     use ark_ec::bn::{Bn, BnConfig};
     use ark_poly::univariate::DensePolynomial;
+    use ark_poly_commit::LabeledPolynomial;
 
-    struct blah<E: Pairing> {
-        _engine: PhantomData<E>
-    }
-
-    impl<E: Pairing> blah<E> {
-        fn durr() {
-            let gen = E::G1::generator();
-            println!("{}",gen);
-        }
-    }
-
-    type blaber = blah<Bn254>;
+    type F = <Bn254 as Pairing>::ScalarField;
     type poly = DensePolynomial<<Bn254 as Pairing>::ScalarField>;
     type kzg_bn254 = KZG<Bn254, poly, PoseidonSponge<<Bn254 as Pairing>::ScalarField>>;
-    
 
+    
     #[test]
     fn test_eval() {
-        blaber::durr();
-        let params = kzg_bn254::setup(10, None, &mut rand::thread_rng());
+        let degree_bound = 2;
+        let params = kzg_bn254::setup(degree_bound, None, &mut rand::thread_rng()).unwrap();
         println!("{:?}", params);
+
+        let (ck, vk) = kzg_bn254::trim(&params, degree_bound, 0, None).unwrap();
+        
+        let data = [F::from(6969), F::from(100)];
+        let poly_data: poly = DenseUVPolynomial::from_coefficients_slice(&data);
+        let labeled_poly = LabeledPolynomial::new(
+            "my data".to_owned(),
+            poly_data,
+            Some(degree_bound),
+            None
+        );
+        let (commits, _rands) = kzg_bn254::commit(&ck, &[labeled_poly], None).unwrap();
+        
+        println!("{:?}", commits[0].commitment());
     }
 }
