@@ -1,11 +1,11 @@
-use std::{error::Error, fmt, marker::PhantomData};
+use std::{error::Error, fmt, marker::PhantomData, ops::Div};
 
 use ark_crypto_primitives::sponge::CryptographicSponge;
-use ark_ff::{PrimeField, Field, Zero};
+use ark_ff::{PrimeField, Field, Zero, One};
 use ark_poly::DenseUVPolynomial;
 use ark_poly_commit::{
     PCCommitment, PCCommitterKey, PCPreparedCommitment, PCPreparedVerifierKey,
-    PCRandomness, PCUniversalParams, PCVerifierKey, Polynomial, PolynomialCommitment,
+    PCRandomness, PCUniversalParams, PCVerifierKey, Polynomial, PolynomialCommitment, LabeledPolynomial,
 };
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_ec::{pairing::Pairing, Group};
@@ -44,6 +44,19 @@ impl <F: PrimeField, G: Group<ScalarField = F>> KZGUniversalParams<G> {
 
     fn element_at(&self, index: usize) -> G {
         self.ref_string[index]
+    }
+
+    /// Commit to the reference string by the sum of multiplying each coefficient by its corresponding element in
+    /// the reference string. Returns the sum and degree size.
+    fn commit_to_params(&self, coeffs: &[F]) -> (G, usize) {
+        let mut sum = G::zero(); 
+        let mut i = 0;
+        for c in coeffs {
+            sum += self.element_at(i) * c;
+            i += 1;
+        }
+
+        (sum, i)
     }
 }
 
@@ -128,20 +141,35 @@ impl PCRandomness for KZGRandomness {
 }
 
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
-struct KZGProof {}
+struct KZGProof<G: Group, F: PrimeField> {
+    // The proof is a single point on the curve
+    proof: G,
+
+    // The evaluated challenge
+    value: F
+}
+
+impl<G: Group, F: PrimeField> KZGProof<G,F> {
+    fn new(proof: G, value: F) -> Self {
+        Self {
+            proof: proof,
+            value: value
+        }
+    }
+}
 
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
-struct KZGBatchProof {}
+struct KZGBatchProof<G: Group, F: PrimeField> {}
 
-impl From<Vec<KZGProof>> for KZGBatchProof {
-    fn from(value: Vec<KZGProof>) -> Self {
+impl<G: Group, F: PrimeField> From< Vec<KZGProof<G,F>> > for KZGBatchProof<G, F> {
+    fn from(value: Vec< KZGProof<G,F> >) -> Self {
         Self {}
     }
 }
 
-impl Into<Vec<KZGProof>> for KZGBatchProof {
-    fn into(self) -> Vec<KZGProof> {
-        vec![KZGProof {}]
+impl<G: Group, F: PrimeField> Into< Vec<KZGProof<G,F>> > for KZGBatchProof<G,F> {
+    fn into(self) -> Vec< KZGProof<G,F> > {
+        vec![KZGProof::new(G::zero(), F::zero())]
     }
 }
 
@@ -201,7 +229,7 @@ struct KZG<
 
 impl<
     E: Pairing,
-    P: DenseUVPolynomial<E::ScalarField, Point = E::ScalarField>,
+    P: DenseUVPolynomial<E::ScalarField, Point = E::ScalarField> + Div<P, Output = P>,
     S: CryptographicSponge,
 > PolynomialCommitment<E::ScalarField, P, S> for KZG<E,P,S> {
     type UniversalParams = KZGUniversalParams<E::G1>;
@@ -211,8 +239,8 @@ impl<
     type Commitment = KZGCommitment<E::G1>;
     type PreparedCommitment = KZGCommitment<E::G1>;
     type Randomness = KZGRandomness;
-    type Proof = KZGProof;
-    type BatchProof = KZGBatchProof;
+    type Proof = KZGProof<E::G1, E::ScalarField>;
+    type BatchProof = KZGBatchProof<E::G1, E::ScalarField>;
     type Error = KZGError;
 
     fn setup<R: RngCore>(
@@ -258,13 +286,7 @@ impl<
         
         for poly in polynomials.into_iter() {
             let coeffs: &[E::ScalarField] = poly.coeffs();
-            let mut sum = E::G1::zero();
-            
-            let mut i = 0;
-            for c in coeffs {
-                sum += ck.element_at(i) * c;
-                i += 1;
-            }
+            let (sum, i) = ck.commit_to_params(coeffs);
 
             commitments.push(ark_poly_commit::LabeledCommitment::new(
                 "KZG-commit".to_owned(),
@@ -276,6 +298,9 @@ impl<
         Ok( (commitments, Vec::new()) )
     }
 
+    /// Q(x) = [F(X)-F(a)] / (x-a)
+    /// This method will generate a proof of the evaluation of point of all ``labeled_polynomials``
+    /// 
     fn open<'a>(
         ck: &Self::CommitterKey,
         labeled_polynomials: impl IntoIterator<Item = &'a ark_poly_commit::LabeledPolynomial<E::ScalarField, P>>,
@@ -290,6 +315,23 @@ impl<
         Self::Randomness: 'a,
         Self::Commitment: 'a
     {
+        for lpoly in labeled_polynomials.into_iter() {
+            let lpoly: &LabeledPolynomial<E::ScalarField, P> = lpoly;
+            let mut poly = lpoly.polynomial().clone();
+            let eval = poly.evaluate(point);
+
+            let divisor = P::from_coefficients_slice(&[E::ScalarField::zero()-point, E::ScalarField::one()]);
+            
+            //let q = (poly + -P::from_coefficients_slice(&[eval])) / divisor;
+            poly -= &P::from_coefficients_slice(&[eval]);
+            
+            
+            let q = poly / divisor;
+        
+            let commit = ck.commit_to_params(q.coeffs());
+
+            // It seems the Div trait does not return a remainder. The divide_with_q_and_r method does
+        }
         todo!()
     }
 
