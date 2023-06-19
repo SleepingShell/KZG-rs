@@ -234,7 +234,6 @@ impl From<ark_poly_commit::Error> for KZGError {
     }
 }
 
-
 struct KZG<
     E: Pairing,
     P: DenseUVPolynomial<E::ScalarField, Point = E::ScalarField>,
@@ -245,11 +244,14 @@ struct KZG<
     _poly: PhantomData<P>
 }
 
-impl<
+
+impl<E,P,S> PolynomialCommitment<E::ScalarField, P, S> for KZG<E,P,S>
+where
     E: Pairing,
-    P: DenseUVPolynomial<E::ScalarField, Point = E::ScalarField> + Div<P, Output = P>,
+    P: DenseUVPolynomial<E::ScalarField, Point = E::ScalarField>,
     S: CryptographicSponge,
-> PolynomialCommitment<E::ScalarField, P, S> for KZG<E,P,S> {
+    for<'p> &'p P: Div<&'p P, Output = P>
+{
     type UniversalParams = KZGUniversalParams<E::G1, E::G2>;
     type CommitterKey = KZGUniversalParams<E::G1, E::G2>;
     type VerifierKey = KZGUniversalParams<E::G1, E::G2>;
@@ -340,7 +342,7 @@ impl<
             poly -= &P::from_coefficients_slice(&[eval]);
 
             let divisor = P::from_coefficients_slice(&[E::ScalarField::zero()-point, E::ScalarField::one()]);
-            let q = poly / divisor;
+            let q = &poly / &divisor;
         
             let commit = ck.commit_to_params(q.coeffs());
 
@@ -372,7 +374,7 @@ impl<
         let pairing2 = E::pairing(commitment.commit - (<E::G1 as Group>::generator() * proof.value), <E::G2 as Group>::generator());
 
         
-        todo!()
+        Ok( pairing1 == pairing2 )
     }
 }
 
@@ -382,14 +384,16 @@ mod tests {
 
     use super::*;
     use ark_bn254::{Bn254, Config};
-    use ark_crypto_primitives::sponge::poseidon::{PoseidonConfig, PoseidonSponge};
+    use ark_crypto_primitives::sponge::poseidon::{PoseidonConfig, PoseidonSponge, PoseidonDefaultConfig, PoseidonDefaultConfigField};
     use ark_ec::bn::{Bn, BnConfig};
+    use ark_ff::Fp256;
     use ark_poly::univariate::DensePolynomial;
-    use ark_poly_commit::LabeledPolynomial;
+    use ark_poly_commit::{LabeledPolynomial, challenge::ChallengeGenerator};
 
     type F = <Bn254 as Pairing>::ScalarField;
+    type S =  PoseidonSponge<<Bn254 as Pairing>::ScalarField>;
     type poly = DensePolynomial<<Bn254 as Pairing>::ScalarField>;
-    type kzg_bn254 = KZG<Bn254, poly, PoseidonSponge<<Bn254 as Pairing>::ScalarField>>;
+    type kzg_bn254 = KZG<Bn254, poly, S>;
 
     
     #[test]
@@ -411,5 +415,19 @@ mod tests {
         let (commits, _rands) = kzg_bn254::commit(&ck, &[labeled_poly], None).unwrap();
         
         println!("{:?}", commits[0].commitment());
+
+        //let mut sponge: S = S::new(&Fp256::get_default_poseidon_parameters(2, false).unwrap());
+        /*
+        let point = F::from(0);
+        let proof = kzg_bn254::open(
+            &ck,
+            &[labeled_poly],
+            &commits,
+            &point,
+            &mut ChallengeGenerator::new_univariate(&mut sponge),
+            &[KZGRandomness::empty()],
+            None
+        );
+        */
     }
 }
