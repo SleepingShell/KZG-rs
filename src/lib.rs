@@ -2,34 +2,39 @@ use std::{error::Error, fmt, marker::PhantomData, ops::Div};
 
 use ark_crypto_primitives::sponge::CryptographicSponge;
 use ark_ff::{PrimeField, Field, Zero, One};
-use ark_poly::DenseUVPolynomial;
+use ark_poly::{DenseUVPolynomial, univariate::DensePolynomial};
 use ark_poly_commit::{
     PCCommitment, PCCommitterKey, PCPreparedCommitment, PCPreparedVerifierKey,
-    PCRandomness, PCUniversalParams, PCVerifierKey, Polynomial, PolynomialCommitment, LabeledPolynomial,
+    PCRandomness, PCUniversalParams, PCVerifierKey, Polynomial, PolynomialCommitment, LabeledPolynomial, LabeledCommitment,
 };
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_ec::{pairing::Pairing, Group};
 use rand::RngCore;
 
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
-struct KZGUniversalParams<G: Group + Sync> {
+struct KZGUniversalParams<G1: Group + Sync, G2: Group + Sync> {
     degree: usize,
-    ref_string: Vec<G>
+    ref_string: Vec<G1>,
+    ref_string_H: Vec<G2>
 }
 
-impl <F: PrimeField, G: Group<ScalarField = F>> KZGUniversalParams<G> {
+impl <F: PrimeField, G1: Group<ScalarField = F>, G2: Group<ScalarField = F>> KZGUniversalParams<G1, G2> {
     fn new_from_secret(secret: F, max_degree: usize) -> Self {
-        let generator = G::generator();
+        let g1 = G1::generator();
+        let g2 = G2::generator();
         let mut params: Self = Self {
             degree: max_degree,
-            ref_string: vec![]
+            ref_string: vec![],
+            ref_string_H: vec![]
         };
-        params.ref_string.push(generator);
+        params.ref_string.push(g1);
+        params.ref_string_H.push(g2);
 
         let mut sec_cur: F = F::one();
         for i in 1..max_degree {
             sec_cur = sec_cur.mul(secret);                  //α^i
-            params.ref_string.push(generator * (sec_cur))
+            params.ref_string.push(g1 * sec_cur);
+            params.ref_string_H.push(g2 * sec_cur);
         }
 
         params
@@ -38,18 +43,23 @@ impl <F: PrimeField, G: Group<ScalarField = F>> KZGUniversalParams<G> {
     fn trim(&self, trim_degree: usize) -> Self {
         Self {
             degree: trim_degree,
-            ref_string: self.ref_string[0..trim_degree].to_vec()
+            ref_string: self.ref_string[0..trim_degree].to_vec(),
+            ref_string_H: self.ref_string_H[0..trim_degree].to_vec()
         }
     }
 
-    fn element_at(&self, index: usize) -> G {
+    fn element_at(&self, index: usize) -> G1 {
         self.ref_string[index]
+    }
+
+    fn element_at_H(&self, index: usize) -> G2 {
+        self.ref_string_H[index]
     }
 
     /// Commit to the reference string by the sum of multiplying each coefficient by its corresponding element in
     /// the reference string. Returns the sum and degree size.
-    fn commit_to_params(&self, coeffs: &[F]) -> (G, usize) {
-        let mut sum = G::zero(); 
+    fn commit_to_params(&self, coeffs: &[F]) -> (G1, usize) {
+        let mut sum = G1::zero(); 
         let mut i = 0;
         for c in coeffs {
             sum += self.element_at(i) * c;
@@ -58,15 +68,16 @@ impl <F: PrimeField, G: Group<ScalarField = F>> KZGUniversalParams<G> {
 
         (sum, i)
     }
+
 }
 
-impl<G: Group> PCUniversalParams for KZGUniversalParams<G> {
+impl<G1: Group, G2: Group> PCUniversalParams for KZGUniversalParams<G1,G2> {
     fn max_degree(&self) -> usize {
         self.degree
     }
 }
 
-impl<G: Group> PCCommitterKey for KZGUniversalParams<G> {
+impl<G1: Group, G2: Group> PCCommitterKey for KZGUniversalParams<G1,G2> {
     fn max_degree(&self) -> usize {
         PCUniversalParams::max_degree(self)
     }
@@ -76,7 +87,7 @@ impl<G: Group> PCCommitterKey for KZGUniversalParams<G> {
     }
 }
 
-impl<G: Group> PCVerifierKey for KZGUniversalParams<G> {
+impl<G1: Group, G2: Group> PCVerifierKey for KZGUniversalParams<G1,G2> {
     fn max_degree(&self) -> usize {
         PCUniversalParams::max_degree(self)
     }
@@ -86,7 +97,7 @@ impl<G: Group> PCVerifierKey for KZGUniversalParams<G> {
     }
 }
 
-impl<G: Group> PCPreparedVerifierKey<KZGUniversalParams<G>> for KZGUniversalParams<G> {
+impl<G1: Group, G2: Group> PCPreparedVerifierKey<KZGUniversalParams<G1,G2>> for KZGUniversalParams<G1,G2> {
     fn prepare(vk: &Self) -> Self {
         vk.clone()
     }
@@ -159,11 +170,17 @@ impl<G: Group, F: PrimeField> KZGProof<G,F> {
 }
 
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
-struct KZGBatchProof<G: Group, F: PrimeField> {}
+struct KZGBatchProof<G: Group, F: PrimeField> {
+    t1: PhantomData<G>,
+    t2: PhantomData<F>
+}
 
 impl<G: Group, F: PrimeField> From< Vec<KZGProof<G,F>> > for KZGBatchProof<G, F> {
     fn from(value: Vec< KZGProof<G,F> >) -> Self {
-        Self {}
+        Self {
+            t1: PhantomData,
+            t2: PhantomData
+        }
     }
 }
 
@@ -217,6 +234,7 @@ impl From<ark_poly_commit::Error> for KZGError {
     }
 }
 
+
 struct KZG<
     E: Pairing,
     P: DenseUVPolynomial<E::ScalarField, Point = E::ScalarField>,
@@ -232,10 +250,10 @@ impl<
     P: DenseUVPolynomial<E::ScalarField, Point = E::ScalarField> + Div<P, Output = P>,
     S: CryptographicSponge,
 > PolynomialCommitment<E::ScalarField, P, S> for KZG<E,P,S> {
-    type UniversalParams = KZGUniversalParams<E::G1>;
-    type CommitterKey = KZGUniversalParams<E::G1>;
-    type VerifierKey = KZGUniversalParams<E::G1>;
-    type PreparedVerifierKey = KZGUniversalParams<E::G1>;
+    type UniversalParams = KZGUniversalParams<E::G1, E::G2>;
+    type CommitterKey = KZGUniversalParams<E::G1, E::G2>;
+    type VerifierKey = KZGUniversalParams<E::G1, E::G2>;
+    type PreparedVerifierKey = KZGUniversalParams<E::G1, E::G2>;
     type Commitment = KZGCommitment<E::G1>;
     type PreparedCommitment = KZGCommitment<E::G1>;
     type Randomness = KZGRandomness;
@@ -299,7 +317,7 @@ impl<
     }
 
     /// Q(x) = [F(X)-F(a)] / (x-a)
-    /// This method will generate a proof of the evaluation of point of all ``labeled_polynomials``
+    /// This method will generate proofs of the evaluation of point of all ``labeled_polynomials``
     /// 
     fn open<'a>(
         ck: &Self::CommitterKey,
@@ -315,24 +333,23 @@ impl<
         Self::Randomness: 'a,
         Self::Commitment: 'a
     {
-        for lpoly in labeled_polynomials.into_iter() {
-            let lpoly: &LabeledPolynomial<E::ScalarField, P> = lpoly;
+        //for lpoly in labeled_polynomials.into_iter() {
+            let lpoly: &LabeledPolynomial<E::ScalarField, P> = labeled_polynomials.into_iter().next().unwrap();
             let mut poly = lpoly.polynomial().clone();
             let eval = poly.evaluate(point);
+            poly -= &P::from_coefficients_slice(&[eval]);
 
             let divisor = P::from_coefficients_slice(&[E::ScalarField::zero()-point, E::ScalarField::one()]);
-            
-            //let q = (poly + -P::from_coefficients_slice(&[eval])) / divisor;
-            poly -= &P::from_coefficients_slice(&[eval]);
-            
-            
             let q = poly / divisor;
         
             let commit = ck.commit_to_params(q.coeffs());
 
+            Ok( KZGProof::new(commit.0, eval) )
+
             // It seems the Div trait does not return a remainder. The divide_with_q_and_r method does
-        }
-        todo!()
+            // This is really only relevant for batch_open
+        //}
+        
     }
 
     fn check<'a>(
@@ -347,6 +364,14 @@ impl<
     where
         Self::Commitment: 'a
     {
+        let lcomm: &LabeledCommitment<Self::Commitment> = commitments.into_iter().next().unwrap();
+        let commitment = lcomm.commitment();
+        let key_sub_index = vk.element_at_H(1) - (<E::G2 as Group>::generator() * point);
+
+        let pairing1 = E::pairing(proof.proof, key_sub_index);
+        let pairing2 = E::pairing(commitment.commit - (<E::G1 as Group>::generator() * proof.value), <E::G2 as Group>::generator());
+
+        
         todo!()
     }
 }
